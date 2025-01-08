@@ -1,0 +1,66 @@
+انت اقترحت عليا لعمل قاعده بيانات وجلب احداثيات الدول العربية في ملف قاعده بيانات 
+import osmnx as ox
+import sqlite3
+import geopandas as gpd
+
+# قائمة بأسماء الدول العربية
+arabic_countries = [
+    'Egypt', 'Saudi Arabia', 'Yemen', 'Oman', 'Kuwait', 'Qatar', 'Bahrain',
+    'United Arab Emirates', 'Jordan', 'Palestine', 'Lebanon', 'Syria', 'Iraq',
+    'Sudan', 'Libya', 'Tunisia', 'Algeria', 'Morocco', 'Mauritania', 'Somalia',
+    'Djibouti', 'Comoros'
+]
+
+# اسم ملف قاعدة بيانات SQLite الذي سيتم إنشاؤه
+sqlite_file = 'arabic_cities.db'
+
+# إنشاء اتصال بقاعدة بيانات SQLite
+conn = sqlite3.connect(sqlite_file)
+cursor = conn.cursor()
+
+# إنشاء جدول المدن إذا لم يكن موجودًا
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS cities (
+    name TEXT,
+    latitude REAL,
+    longitude REAL
+)
+''')
+
+# جلب بيانات المدن من OpenStreetMap وحفظها في قاعدة البيانات
+for country in arabic_countries:
+    try:
+        # جلب بيانات الأماكن المصنفة كمدن داخل الدولة
+        gdf = ox.geocode_to_gdf(country)
+        if not gdf.empty:
+            # الحصول على حدود الدولة
+            country_boundary = gdf.geometry.iloc[0]
+            # جلب جميع الأماكن المصنفة كمدن داخل حدود الدولة
+            tags = {"place": ["city", "town"]}
+            cities = ox.features_from_polygon(country_boundary, tags)
+
+            for index, row in cities.iterrows():
+                if 'name' in row:
+                    name = row['name']
+                    if row.geometry.geom_type == 'Point':
+                        longitude, latitude = row.geometry.x, row.geometry.y
+                        cursor.execute("INSERT INTO cities (name, latitude, longitude) VALUES (?, ?, ?)", (name, latitude, longitude))
+                        print(f"تمت إضافة مدينة: {name} ({country}) - الإحداثيات: {latitude}, {longitude}")
+                    elif row.geometry.geom_type == 'Polygon':
+                        # إذا كانت المدينة عبارة عن مضلع، نأخذ نقطة المنتصف
+                        centroid = row.geometry.centroid
+                        longitude, latitude = centroid.x, centroid.y
+                        cursor.execute("INSERT INTO cities (name, latitude, longitude) VALUES (?, ?, ?)", (name, latitude, longitude))
+                        print(f"تمت إضافة مدينة (من مضلع): {name} ({country}) - الإحداثيات: {latitude}, {longitude}")
+        else:
+            print(f"لم يتم العثور على بيانات لدولة {country}")
+
+    except Exception as e:
+        print(f"حدث خطأ أثناء معالجة بيانات دولة {country}: {e}")
+
+# حفظ التغييرات وإغلاق الاتصال بقاعدة البيانات
+conn.commit()
+conn.close()
+
+print(f"تم إنشاء قاعدة بيانات المدن العربية: {sqlite_file}")
+المهم ملف قاعده الببانات به اسماء اماكن null  بالاضافه الي اسماء بالانجليزي والعربي  وانا اريد توحيد الاسماء كلها بالعربي ولكن قبل ارسال لي الكود المعدل الرجاء اقترح لي ما يمكن تطوير ملف قاعده البيانات او تحسينه بافكار غير تقليديه لان اريد قاعده بيانات قويه لاحاثيات كل المناطق بالددول العربيه حتي ولو صغيرلعمل تطبيق مواقبت الصلاه وحساب الشروق والغروب بدون انترنت نهائي 
