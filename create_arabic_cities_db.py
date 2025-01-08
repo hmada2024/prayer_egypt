@@ -1,35 +1,29 @@
-import geopandas as gpd
 from sqlalchemy import create_engine, text
 from timezonefinder import TimezoneFinder
 import logging
 import pycountry
-from tqdm import tqdm  # استيراد مكتبة tqdm
+from tqdm import tqdm
+import requests
+import json
 
 # Setup logging for better error tracking
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# اسم ملف بيانات OSM الذي قمت بتنزيله
-osm_file = 'middle_east.osm.pbf'
-
 # اسم ملف قاعدة بيانات SQLite الذي سيتم إنشاؤه
-sqlite_file = 'arabic_cities_enhanced.db'
+sqlite_file = 'egyptian_cities_enhanced.db'
 
-# الدول العربية التي نريد استخلاص المدن منها
-arabic_countries = [
-    'Egypt', 'Saudi Arabia', 'Yemen', 'Oman', 'Kuwait', 'Qatar', 'Bahrain',
-    'United Arab Emirates', 'Jordan', 'Palestine', 'Lebanon', 'Syria', 'Iraq',
-    'Sudan', 'Libya', 'Tunisia', 'Algeria', 'Morocco', 'Mauritania', 'Somalia',
-    'Djibouti', 'Comoros'
-]
+# الدولة المستهدفة
+egypt_name_en = 'Egypt'
+egypt_name_osm = 'مصر'  # الاسم المستخدم في OpenStreetMap
 
 # تهيئة TimezoneFinder
 tf = TimezoneFinder()
 
-# دالة مساعدة لاستخراج اسم التقسيم الإداري (أكثر مرونة)
-def get_admin_name(row, *keys):
+# دالة مساعدة لاستخراج اسم التقسيم الإداري من خواص عنصر OSM (مع التركيز على اللغة العربية)
+def get_admin_name_from_tags(tags, *keys):
     for key in keys:
-        if key in row and isinstance(row[key], str):
-            return row[key]
+        if key in tags:
+            return tags[key]
     return None
 
 # إنشاء محرك لقاعدة بيانات SQLite
@@ -50,64 +44,79 @@ with engine.connect() as connection:
         )
     '''))
 
-# قراءة بيانات المدن من ملف OSM
+# استخلاص المدن المصرية من Overpass API وإضافة معلومات إضافية
+all_egyptian_cities_data = []
+
+logging.info(f"جلب بيانات المدن من Overpass API لدولة: {egypt_name_en}")
+
+overpass_url = "http://overpass-api.de/api/interpreter"
+overpass_query = f"""
+    [out:json];
+    area[name="{egypt_name_osm}"];
+    (
+      node["place"~"city|town|village|hamlet"](area);
+      way["place"~"city|town|village|hamlet"](area);
+      relation["place"~"city|town|village|hamlet"](area);
+    );
+    out center;
+    >;
+    out skel qt;
+"""
 try:
-    gdf = gpd.read_file(f'PBF:{osm_file}', layer='points')
-    logging.info(f"تم قراءة البيانات من ملف OSM: {osm_file}")
-except Exception as e:
-    logging.error(f"حدث خطأ أثناء قراءة ملف OSM: {e}")
-    exit()
+    response = requests.get(overpass_url, params={'data': overpass_query})
+    response.raise_for_status()
+    data = response.json()
 
-# استخلاص المدن العربية وإضافة معلومات إضافية مع شريط التقدم
-all_arabic_cities_data = []
-for index, row in tqdm(gdf.iterrows(), total=len(gdf), desc="Processing Cities"):
-    if row['fclass'] in ['city', 'town', 'village', 'hamlet']:  # توسيع نطاق البحث ليشمل القرى والتجمعات
-        if 'name' in row:
-            country_code = row.get('country')
-            if country_code:
-                try:
-                    country_name_en = pycountry.countries.get(alpha_2=country_code).name
-                    if country_name_en in arabic_countries:
-                        name = row['name']
-                        name_ar = row.get('name:ar', None)
-                        alternative_names = name if name_ar else None
-                        name_ar = name_ar if name_ar else name
+    for element in tqdm(data['elements'], desc=f"Processing Cities in {egypt_name_en}"):
+        if 'center' in element:
+            latitude = element['center']['lat']
+            longitude = element['center']['lon']
+        elif 'lat' in element and 'lon' in element:
+            latitude = element['lat']
+            longitude = element['lon']
+        else:
+            continue
 
-                        if row.geometry.geom_type == 'Point':
-                            longitude, latitude = row.geometry.x, row.geometry.y
-                        else:
-                            centroid = row.geometry.centroid
-                            longitude, latitude = centroid.x, centroid.y
+        tags = element.get('tags', {})
+        name = tags.get('name')
+        name_ar = tags.get('name:ar')
+        alternative_names = name if name_ar else None
+        name_ar = name_ar if name_ar else name
 
-                        timezone = tf.timezone_at(lng=longitude, lat=latitude)
+        if name_ar:
+            timezone = tf.timezone_at(lng=longitude, lat=latitude)
+            country_code = tags.get('ISO3166-1:alpha2')
 
-                        # استخلاص التقسيمات الإدارية بشكل أكثر مرونة
-                        country_ar_osm = get_admin_name(row, 'country:ar')
-                        governorate_ar_osm = get_admin_name(row, 'state:ar', 'governorate:ar', 'county:ar')
+            # توحيد استخلاص اسم المحافظة باللغة العربية
+            governorate_ar_osm = get_admin_name_from_tags(tags, 'name:ar:governorate', 'name:ar: محافظه', 'name:ar:muhafazah', 'name:ar:state')
 
-                        all_arabic_cities_data.append({
-                            'name_ar': name_ar,
-                            'latitude': latitude,
-                            'longitude': longitude,
-                            'timezone': timezone,
-                            'country_from_osm': country_code,
-                            'country_ar': country_ar_osm,
-                            'governorate_ar': governorate_ar_osm,
-                            'alternative_names': alternative_names,
-                        })
-                except Exception as e:
-                    logging.warning(f"خطأ في معالجة مدينة '{row.get('name', 'غير مسمى')}' في {country_code}: {e}")
+            all_egyptian_cities_data.append({
+                'name_ar': name_ar,
+                'latitude': latitude,
+                'longitude': longitude,
+                'timezone': timezone,
+                'country_from_osm': country_code,
+                'country_ar': 'مصر',  # تثبيت اسم الدولة بالعربية
+                'governorate_ar': governorate_ar_osm,
+                'alternative_names': alternative_names,
+            })
+
+except requests.exceptions.RequestException as e:
+    logging.error(f"خطأ في الاتصال بـ Overpass API لدولة {egypt_name_en}: {e}")
+except json.JSONDecodeError as e:
+    logging.error(f"خطأ في تحليل JSON من Overpass API لدولة {egypt_name_en}: {e}")
 
 # حفظ البيانات في قاعدة بيانات SQLite مرة واحدة بكفاءة
-if all_arabic_cities_data:
+if all_egyptian_cities_data:
     try:
         from pandas import DataFrame
-        df = DataFrame(all_arabic_cities_data)
+        import pandas as pd
+        df = pd.DataFrame(all_egyptian_cities_data)
         df.to_sql('cities', engine, if_exists='append', index=False)
-        logging.info(f"تم حفظ {len(all_arabic_cities_data)} مدينة في قاعدة البيانات: {sqlite_file}")
+        logging.info(f"تم حفظ {len(all_egyptian_cities_data)} مدينة في قاعدة البيانات: {sqlite_file}")
     except Exception as e:
         logging.error(f"حدث خطأ أثناء حفظ البيانات في قاعدة البيانات: {e}")
 else:
-    logging.info("لم يتم العثور على أي مدن عربية مطابقة.")
+    logging.info("لم يتم العثور على أي مدن مصرية مطابقة.")
 
-print(f"تم إنشاء قاعدة بيانات المدن العربية: {sqlite_file}")
+print(f"تم إنشاء قاعدة بيانات المدن المصرية: {sqlite_file}")
