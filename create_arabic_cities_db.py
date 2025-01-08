@@ -2,7 +2,8 @@ import geopandas as gpd
 from sqlalchemy import create_engine, text
 from timezonefinder import TimezoneFinder
 import logging
-import pycountry 
+import pycountry
+from tqdm import tqdm  # استيراد مكتبة tqdm
 
 # Setup logging for better error tracking
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,9 +58,9 @@ except Exception as e:
     logging.error(f"حدث خطأ أثناء قراءة ملف OSM: {e}")
     exit()
 
-# استخلاص المدن العربية وإضافة معلومات إضافية
+# استخلاص المدن العربية وإضافة معلومات إضافية مع شريط التقدم
 all_arabic_cities_data = []
-for index, row in gdf.iterrows():
+for index, row in tqdm(gdf.iterrows(), total=len(gdf), desc="Processing Cities"):
     if row['fclass'] in ['city', 'town', 'village', 'hamlet']:  # توسيع نطاق البحث ليشمل القرى والتجمعات
         if 'name' in row:
             country_code = row.get('country')
